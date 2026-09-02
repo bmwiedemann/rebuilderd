@@ -70,6 +70,24 @@ services:
     - ./secret:/secret
     depends_on:
     - daemon
+  worker-opensuse:
+    build:
+      context: .
+      dockerfile: worker/Dockerfile.opensuse
+    # osc builds in a chroot, which needs to mount /proc
+    privileged: true
+    # number of concurrent workers
+    scale: 1
+    init: true
+    command: ['connect', 'http://daemon:8484']
+    environment:
+    - REBUILDERD_COOKIE_PATH=/secret/auth
+    volumes:
+    - ./secret:/secret
+    # osc build requires an account on https://build.opensuse.org
+    #- ~/.config/osc/oscrc:/root/.config/osc/oscrc:ro
+    depends_on:
+    - daemon
   worker-tails:
     build:
       context: .
