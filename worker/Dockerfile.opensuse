@@ -1,0 +1,25 @@
+FROM opensuse/tumbleweed
+WORKDIR /usr/src/rebuilderd
+RUN zypper -n install cargo rust gcc
+COPY . .
+RUN --mount=type=cache,target=/var/cache/buildkit \
+    CARGO_HOME=/var/cache/buildkit/cargo \
+    CARGO_TARGET_DIR=/var/cache/buildkit/opensuse/target \
+    cargo build --release --locked -p rebuilderd-worker && \
+    cp -v /var/cache/buildkit/opensuse/target/release/rebuilderd-worker /
+
+FROM opensuse/tumbleweed
+# `build` is obs-build, the tool osc runs to set up the buildroot
+RUN zypper -n install osc build && zypper clean -a
+COPY --from=0 \
+    /usr/src/rebuilderd/worker/rebuilder-opensuse.sh \
+    /usr/local/libexec/rebuilderd/
+COPY --from=0 /rebuilderd-worker /usr/local/bin/
+ENV REBUILDERD_WORKER_BACKEND=opensuse=/usr/local/libexec/rebuilderd/rebuilder-opensuse.sh
+# we already run as root, osc doesn't need to escalate to run obs-build
+ENV OSC_SU_WRAPPER=
+# NOTE: `osc build` needs an account on https://build.opensuse.org, mount an
+# oscrc to /root/.config/osc/oscrc. The default chroot buildroot also needs
+# permission to mount /proc, set REBUILDERD_OSC_VM_TYPE=kvm to build in a vm
+# instead.
+ENTRYPOINT ["rebuilderd-worker"]

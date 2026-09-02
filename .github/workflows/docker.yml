@@ -27,6 +27,8 @@ jobs:
           file: worker/Dockerfile.debian
         - name: worker-fedora
           file: worker/Dockerfile.fedora
+        - name: worker-opensuse
+          file: worker/Dockerfile.opensuse
         - name: worker-tails
           file: worker/Dockerfile.tails
     steps:
