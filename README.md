@@ -47,6 +47,16 @@ afford to.
 | **Tails** | 🚀 experimental | ❌ | - | ❌ | [docs](https://tails.boum.org/contribute/build/) ([script](worker/rebuilder-tails.sh)) |
 | **Alpine** | ✨ planned | - | - | - | - |
 | **Fedora** | 🚀 experimental | ❌ | ❌ | ✔️ | [fedora-repro-build](https://github.com/keszybz/fedora-repro-build/) |
+| **openSUSE** | 🚀 experimental | ✔️ | ❌ | ✔️ | [osc](https://github.com/openSUSE/osc) ([script](worker/rebuilder-opensuse.sh)) |
+
+**openSUSE**: rebuilds run `osc build`, which needs an account on
+[build.opensuse.org](https://build.opensuse.org). The buildroot is a chroot by
+default, set `REBUILDERD_OSC_VM_TYPE=kvm` to build in a vm instead. Note that
+Leap inherits most of its packages from SLE, which are built on the internal
+build.suse.de and can't be rebuilt from the outside, so the example sync profile
+limits Leap to the packages built by openSUSE. Also note the build dependencies
+are resolved against the *current* state of the repository, so a package built
+with an older toolchain than the one currently published is expected to differ.
 
 **Docker**: There's a docker-compose example setup in this repository, but not
 all rebuilder backends support running inside of a docker container (for
