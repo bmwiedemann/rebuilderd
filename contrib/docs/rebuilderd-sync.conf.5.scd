@@ -17,7 +17,12 @@ commandline all the time.
 # OPTIONS
 
 _distro=_
-	The name of the distro, currently either *archlinux* or *debian*.
+	The name of the distro, currently one of *archlinux*, *debian*, *fedora*,
+	*opensuse* or *tails*. This is also the name of the rebuilder backend the
+	packages are scheduled for.
+
+_sync_method=_
+	Use the sync implementation of a different distro than _distro=_ selects.
 
 _suite=_
 	This is for packages that have multiple suites/repositories, like *main*,
