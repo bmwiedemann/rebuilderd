@@ -12,11 +12,11 @@ use rebuilderd_common::errors::*;
 use rebuilderd_common::utils::zstd_compress;
 use std::collections::HashMap;
 use std::fs;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, SeekFrom};
 use std::path::Path;
 use std::time::Duration;
 use tokio::fs::File;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::time;
 
 pub struct Context<'a> {
@@ -35,6 +35,53 @@ fn path_to_string(path: &Path) -> Result<String> {
     Ok(s.to_string())
 }
 
+const RPM_LEAD_MAGIC: &[u8] = b"\xed\xab\xee\xdb";
+const RPM_HEADER_MAGIC: &[u8] = b"\x8e\xad\xe8";
+const RPM_LEAD_SIZE: usize = 96;
+const RPM_HEADER_INTRO_SIZE: usize = 16;
+
+/// Distributions sign their rpms after building them, which a rebuild can not
+/// reproduce. The signature lives in a header of its own in front of the
+/// package, so return the offset just past it to compare the rest.
+///
+/// Returns 0 for everything that isn't an rpm.
+fn rpm_body_offset(buf: &[u8]) -> u64 {
+    let Some(header) = buf.strip_prefix(RPM_LEAD_MAGIC) else {
+        return 0;
+    };
+    let Some(header) = header
+        .get(RPM_LEAD_SIZE - RPM_LEAD_MAGIC.len()..)
+        .and_then(|h| h.strip_prefix(RPM_HEADER_MAGIC))
+    else {
+        return 0;
+    };
+
+    // the intro is the magic, a version byte, 4 reserved bytes, the number of
+    // index entries and the size of the data they point into
+    let Some(intro) = header.get(5..13) else {
+        return 0;
+    };
+    let index_entries = u32::from_be_bytes(intro[..4].try_into().unwrap()) as u64;
+    let data_size = u32::from_be_bytes(intro[4..].try_into().unwrap()) as u64;
+
+    let offset =
+        RPM_LEAD_SIZE as u64 + RPM_HEADER_INTRO_SIZE as u64 + index_entries * 16 + data_size;
+    // the header that follows is aligned to 8 bytes
+    offset.next_multiple_of(8)
+}
+
+/// Read enough of the file to find where its signature header ends.
+async fn skip_rpm_signature(f: &mut File, path: &Path) -> Result<u64> {
+    let mut buf = [0u8; RPM_LEAD_SIZE + RPM_HEADER_INTRO_SIZE];
+    let n = f.read(&mut buf).await?;
+    let offset = rpm_body_offset(&buf[..n]);
+    if offset > 0 {
+        debug!("Skipping {offset} bytes of rpm signature header in {path:?}");
+    }
+    f.seek(SeekFrom::Start(offset)).await?;
+    Ok(offset)
+}
+
 pub async fn compare_files(a: &Path, b: &Path) -> Result<bool> {
     let mut buf1 = [0u8; 4096];
     let mut buf2 = [0u8; 4096];
@@ -47,7 +94,11 @@ pub async fn compare_files(a: &Path, b: &Path) -> Result<bool> {
         .await
         .with_context(|| anyhow!("Failed to open {:?}", b))?;
 
-    let mut pos = 0;
+    // the signature headers may have different sizes, so track the offsets apart
+    let offset = skip_rpm_signature(&mut f1, a).await?;
+    skip_rpm_signature(&mut f2, b).await?;
+
+    let mut pos = offset as usize;
     loop {
         // read up to 4k bytes from the first file
         let n = f1.read_buf(&mut &mut buf1[..]).await?;
@@ -318,6 +369,68 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join("a"), [0u8; 4096 * 100]).unwrap();
         fs::write(dir.path().join("b"), [1u8; 4096 * 100]).unwrap();
+        let equal = compare_files(&dir.path().join("a"), &dir.path().join("b"))
+            .await
+            .unwrap();
+        assert!(!equal);
+    }
+
+    /// An rpm with a signature header of `sig_entries` entries pointing into
+    /// `sig_data`, followed by `body`.
+    fn fake_rpm(sig_entries: u32, sig_data: &[u8], body: &[u8]) -> Vec<u8> {
+        let mut rpm = Vec::new();
+        rpm.extend_from_slice(RPM_LEAD_MAGIC);
+        rpm.resize(RPM_LEAD_SIZE, 0);
+
+        rpm.extend_from_slice(RPM_HEADER_MAGIC);
+        rpm.extend_from_slice(&[0x01, 0, 0, 0, 0]);
+        rpm.extend_from_slice(&sig_entries.to_be_bytes());
+        rpm.extend_from_slice(&(sig_data.len() as u32).to_be_bytes());
+        rpm.resize(rpm.len() + sig_entries as usize * 16, 0);
+        rpm.extend_from_slice(sig_data);
+        rpm.resize(rpm.len().next_multiple_of(8), 0);
+
+        rpm.extend_from_slice(body);
+        rpm
+    }
+
+    #[test]
+    fn rpm_body_offset_of_non_rpm() {
+        assert_eq!(rpm_body_offset(b""), 0);
+        assert_eq!(rpm_body_offset(b"ohai"), 0);
+        // a truncated lead
+        assert_eq!(rpm_body_offset(b"\xed\xab\xee\xdb"), 0);
+    }
+
+    #[test]
+    fn rpm_body_offset_skips_signature_header() {
+        let rpm = fake_rpm(2, b"some signature", b"payload");
+        // 96 lead + 16 intro + 2 index entries + 14 bytes of data, padded to 8
+        assert_eq!(rpm_body_offset(&rpm), 160);
+        assert_eq!(&rpm[160..], b"payload");
+    }
+
+    #[tokio::test]
+    async fn compare_rpms_differing_only_in_signature() {
+        let dir = tempfile::tempdir().unwrap();
+        // a signed package carries more signature tags than the rebuild of it
+        fs::write(
+            dir.path().join("a"),
+            fake_rpm(3, b"signed by the distro", b"identical body"),
+        )
+        .unwrap();
+        fs::write(dir.path().join("b"), fake_rpm(1, b"", b"identical body")).unwrap();
+        let equal = compare_files(&dir.path().join("a"), &dir.path().join("b"))
+            .await
+            .unwrap();
+        assert!(equal);
+    }
+
+    #[tokio::test]
+    async fn compare_rpms_differing_in_body() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a"), fake_rpm(3, b"signature", b"one body")).unwrap();
+        fs::write(dir.path().join("b"), fake_rpm(1, b"", b"other body")).unwrap();
         let equal = compare_files(&dir.path().join("a"), &dir.path().join("b"))
             .await
             .unwrap();
