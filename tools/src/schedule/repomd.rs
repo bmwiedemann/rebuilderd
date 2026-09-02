@@ -1,4 +1,4 @@
-//! Shared rpm-md (repodata) parsing, used by the fedora sync.
+//! Shared rpm-md (repodata) parsing, used by the fedora and opensuse syncs.
 
 use crate::decompress;
 use crate::schedule::{Pkg, fetch_url_or_path};
