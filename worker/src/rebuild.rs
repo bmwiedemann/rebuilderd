@@ -73,7 +73,15 @@ fn rpm_body_offset(buf: &[u8]) -> u64 {
 /// Read enough of the file to find where its signature header ends.
 async fn skip_rpm_signature(f: &mut File, path: &Path) -> Result<u64> {
     let mut buf = [0u8; RPM_LEAD_SIZE + RPM_HEADER_INTRO_SIZE];
-    let n = f.read(&mut buf).await?;
+    // a single read is allowed to return less than the buffer holds, and coming
+    // up short here would silently compare the signature headers again
+    let mut n = 0;
+    while n < buf.len() {
+        match f.read(&mut buf[n..]).await? {
+            0 => break,
+            read => n += read,
+        }
+    }
     let offset = rpm_body_offset(&buf[..n]);
     if offset > 0 {
         debug!("Skipping {offset} bytes of rpm signature header in {path:?}");
